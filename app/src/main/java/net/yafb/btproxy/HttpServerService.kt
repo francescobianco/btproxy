@@ -43,6 +43,9 @@ class HttpServerService : Service() {
         startForeground(NOTIFICATION_ID, createNotification(port))
         
         serviceScope.launch {
+            // Stop existing server if running
+            stopHttpServer()
+            
             connectToSelectedDevices(selectedDevices)
             startHttpServer(port)
         }
@@ -66,14 +69,44 @@ class HttpServerService : Service() {
                     json()
                 }
                 routing {
-                    // Ping endpoint - no authentication required
+                    // Simple text ping - no JSON serialization
                     get("/ping") {
-                        call.respond(mapOf<String, Any>(
-                            "message" to "pong",
-                            "server" to "btproxy",
-                            "timestamp" to System.currentTimeMillis(),
-                            "version" to "1.0"
-                        ))
+                        try {
+                            Log.d(TAG, "Ping endpoint called")
+                            call.respondText("pong", ContentType.Text.Plain)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error in /ping endpoint", e)
+                            logToMainActivity("ERROR in /ping: ${e.message}")
+                            call.respondText("Error: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
+                        }
+                    }
+                    
+                    // Simple text test
+                    get("/simple") {
+                        try {
+                            Log.d(TAG, "Simple endpoint called")
+                            call.respondText("BT Proxy Server is running on port $port", ContentType.Text.Plain)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error in /simple endpoint", e)
+                            call.respondText("Error: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
+                        }
+                    }
+                    
+                    // JSON ping endpoint
+                    get("/ping-json") {
+                        try {
+                            Log.d(TAG, "JSON ping endpoint called")
+                            call.respond(mapOf<String, Any>(
+                                "message" to "pong",
+                                "server" to "btproxy",
+                                "timestamp" to System.currentTimeMillis(),
+                                "version" to "1.0"
+                            ))
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error in /ping-json endpoint", e)
+                            logToMainActivity("ERROR in /ping-json: ${e.message}")
+                            call.respondText("JSON Error: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
+                        }
                     }
                     
                     // Health check endpoint - no authentication required
@@ -211,9 +244,15 @@ class HttpServerService : Service() {
             }.start(wait = false)
             
             Log.d(TAG, "HTTP Server started on port $port")
+            logToMainActivity("HTTP Server started successfully on port $port")
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start HTTP server", e)
+            logToMainActivity("ERROR: Failed to start HTTP server: ${e.message}")
+            
+            if (e.message?.contains("Address already in use") == true) {
+                logToMainActivity("Port $port is already in use. Try a different port or restart the app.")
+            }
         }
     }
     
@@ -228,6 +267,19 @@ class HttpServerService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse space-separated hex string: $hexString", e)
             null
+        }
+    }
+    
+    private suspend fun stopHttpServer() {
+        try {
+            server?.let {
+                Log.d(TAG, "Stopping existing HTTP server...")
+                it.stop(1000, 2000)
+                server = null
+                Log.d(TAG, "HTTP server stopped")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping HTTP server", e)
         }
     }
     
