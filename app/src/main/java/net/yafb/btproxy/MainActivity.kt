@@ -19,6 +19,8 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import java.text.SimpleDateFormat
 import java.util.*
+import android.text.TextWatcher
+import android.text.Editable
 
 class MainActivity : AppCompatActivity() {
     
@@ -35,10 +37,15 @@ class MainActivity : AppCompatActivity() {
     
     private val discoveredDevices = mutableListOf<BluetoothDevice>()
     private val selectedDevices = mutableSetOf<String>()
+    private val savedDiscoveredAddresses = mutableSetOf<String>()
     private var isScanning = false
     private var isServerRunning = false
     private val logEntries = mutableListOf<String>()
     private val dateFormatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    
+    private val saveConfigRunnable = Runnable {
+        saveAppState()
+    }
     
     private val logReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -51,15 +58,24 @@ class MainActivity : AppCompatActivity() {
                 when {
                     message.contains("HTTP Server started successfully") -> {
                         isServerRunning = true
-                        runOnUiThread { updateUI() }
+                        runOnUiThread { 
+                            updateUI()
+                            saveAppState()
+                        }
                     }
                     message.contains("ERROR: Failed to start HTTP server") -> {
                         isServerRunning = false
-                        runOnUiThread { updateUI() }
+                        runOnUiThread { 
+                            updateUI()
+                            saveAppState()
+                        }
                     }
                     message.contains("HTTP server stopped") -> {
                         isServerRunning = false
-                        runOnUiThread { updateUI() }
+                        runOnUiThread { 
+                            updateUI()
+                            saveAppState()
+                        }
                     }
                 }
             }
@@ -80,6 +96,12 @@ class MainActivity : AppCompatActivity() {
     
     companion object {
         private const val REQUEST_PERMISSIONS = 1
+        private const val PREFS_NAME = "btproxy_app_state"
+        private const val PREF_PORT = "server_port"
+        private const val PREF_AUTH_TOKEN = "auth_token"
+        private const val PREF_SELECTED_DEVICES = "selected_devices"
+        private const val PREF_SERVER_RUNNING = "server_running"
+        private const val PREF_DISCOVERED_DEVICE_ADDRESSES = "discovered_device_addresses"
         private val REQUIRED_PERMISSIONS = arrayOf(
             Manifest.permission.BLUETOOTH,
             Manifest.permission.BLUETOOTH_ADMIN,
@@ -112,6 +134,9 @@ class MainActivity : AppCompatActivity() {
         }
         
         addLogEntry("BT Proxy started", System.currentTimeMillis())
+        
+        // Load saved state
+        loadAppState()
     }
     
     private fun initViews() {
@@ -130,6 +155,7 @@ class MainActivity : AppCompatActivity() {
                 selectedDevices.remove(device.address)
             }
             updateUI()
+            saveAppState() // Save when device selection changes
         }
         
         recyclerView.layoutManager = LinearLayoutManager(this)
@@ -153,6 +179,27 @@ class MainActivity : AppCompatActivity() {
         
         portEditText.setText("8080")
         authTokenEditText.setText("secret")
+        
+        // Add text watchers to save configuration changes
+        portEditText.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                // Save with a small delay to avoid excessive saves while typing
+                portEditText.removeCallbacks(saveConfigRunnable)
+                portEditText.postDelayed(saveConfigRunnable, 1000)
+            }
+        })
+        
+        authTokenEditText.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                authTokenEditText.removeCallbacks(saveConfigRunnable)
+                authTokenEditText.postDelayed(saveConfigRunnable, 1000)
+            }
+        })
+        
         updateUI()
     }
     
@@ -300,6 +347,93 @@ class MainActivity : AppCompatActivity() {
             unregisterReceiver(logReceiver)
         } catch (e: IllegalArgumentException) {
             // Already unregistered
+        }
+        
+        // Save current state before destroying
+        saveAppState()
+    }
+    
+    private fun saveAppState() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        prefs.edit().apply {
+            putString(PREF_PORT, portEditText.text.toString())
+            putString(PREF_AUTH_TOKEN, authTokenEditText.text.toString())
+            putStringSet(PREF_SELECTED_DEVICES, selectedDevices.toSet())
+            putBoolean(PREF_SERVER_RUNNING, isServerRunning)
+            
+            // Save discovered device MAC addresses
+            val discoveredAddresses = discoveredDevices.map { it.address }.toSet()
+            putStringSet(PREF_DISCOVERED_DEVICE_ADDRESSES, discoveredAddresses)
+            
+            apply()
+        }
+    }
+    
+    private fun loadAppState() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        
+        // Load configuration
+        val savedPort = prefs.getString(PREF_PORT, "8080") ?: "8080"
+        val savedAuthToken = prefs.getString(PREF_AUTH_TOKEN, "secret") ?: "secret"
+        
+        portEditText.setText(savedPort)
+        authTokenEditText.setText(savedAuthToken)
+        
+        // Load selected devices
+        val savedSelectedDevices = prefs.getStringSet(PREF_SELECTED_DEVICES, emptySet()) ?: emptySet()
+        selectedDevices.clear()
+        selectedDevices.addAll(savedSelectedDevices)
+        
+        // Load server running state
+        isServerRunning = prefs.getBoolean(PREF_SERVER_RUNNING, false)
+        
+        // If server was running, restart it
+        if (isServerRunning && selectedDevices.isNotEmpty()) {
+            // Delay to ensure UI is ready
+            postDelayed({
+                addLogEntry("Auto-restarting server from saved state with ${selectedDevices.size} devices", System.currentTimeMillis())
+                startHttpServer()
+            }, 1000)
+        } else {
+            isServerRunning = false
+        }
+        
+        // Update UI with loaded state
+        updateUI()
+        
+        // Load previously discovered device addresses for future scans
+        val loadedAddresses = prefs.getStringSet(PREF_DISCOVERED_DEVICE_ADDRESSES, emptySet()) ?: emptySet()
+        savedDiscoveredAddresses.clear()
+        savedDiscoveredAddresses.addAll(loadedAddresses)
+        
+        if (savedDiscoveredAddresses.isNotEmpty()) {
+            addLogEntry("Loaded ${savedDiscoveredAddresses.size} previously discovered devices", System.currentTimeMillis())
+            // Try to recreate devices from saved addresses if Bluetooth is available
+            recreateKnownDevices()
+        }
+    }
+    
+    private fun recreateKnownDevices() {
+        if (!hasRequiredPermissions()) return
+        
+        try {
+            savedDiscoveredAddresses.forEach { address ->
+                if (BluetoothAdapter.checkBluetoothAddress(address)) {
+                    val device = bluetoothAdapter.getRemoteDevice(address)
+                    if (!discoveredDevices.any { it.address == device.address }) {
+                        discoveredDevices.add(device)
+                    }
+                }
+            }
+            
+            if (discoveredDevices.isNotEmpty()) {
+                runOnUiThread {
+                    deviceAdapter.notifyDataSetChanged()
+                    addLogEntry("Restored ${discoveredDevices.size} known devices", System.currentTimeMillis())
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error recreating known devices", e)
         }
     }
 }
