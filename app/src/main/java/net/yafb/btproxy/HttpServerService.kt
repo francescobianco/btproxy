@@ -254,6 +254,7 @@ Authenticated endpoints (require X-BtProxy header):
                 it.stop(1000, 2000)
                 server = null
                 Log.d(TAG, "HTTP server stopped")
+                logToMainActivity("HTTP server stopped")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping HTTP server", e)

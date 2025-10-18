@@ -36,6 +36,7 @@ class MainActivity : AppCompatActivity() {
     private val discoveredDevices = mutableListOf<BluetoothDevice>()
     private val selectedDevices = mutableSetOf<String>()
     private var isScanning = false
+    private var isServerRunning = false
     private val logEntries = mutableListOf<String>()
     private val dateFormatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     
@@ -45,6 +46,22 @@ class MainActivity : AppCompatActivity() {
                 val message = intent.getStringExtra("message") ?: return
                 val timestamp = intent.getLongExtra("timestamp", System.currentTimeMillis())
                 addLogEntry(message, timestamp)
+                
+                // Track server state from log messages
+                when {
+                    message.contains("HTTP Server started successfully") -> {
+                        isServerRunning = true
+                        runOnUiThread { updateUI() }
+                    }
+                    message.contains("ERROR: Failed to start HTTP server") -> {
+                        isServerRunning = false
+                        runOnUiThread { updateUI() }
+                    }
+                    message.contains("HTTP server stopped") -> {
+                        isServerRunning = false
+                        runOnUiThread { updateUI() }
+                    }
+                }
             }
         }
     }
@@ -127,7 +144,11 @@ class MainActivity : AppCompatActivity() {
         }
         
         startServerButton.setOnClickListener {
-            startHttpServer()
+            if (isServerRunning) {
+                stopHttpServer()
+            } else {
+                startHttpServer()
+            }
         }
         
         portEditText.setText("8080")
@@ -207,10 +228,36 @@ class MainActivity : AppCompatActivity() {
         addLogEntry("Starting HTTP server on port $port with auth token: $authToken", System.currentTimeMillis())
     }
     
+    private fun stopHttpServer() {
+        val intent = Intent(this, HttpServerService::class.java)
+        stopService(intent)
+        isServerRunning = false
+        statusTextView.text = "HTTP Server stopped"
+        addLogEntry("HTTP Server stopped by user", System.currentTimeMillis())
+        updateUI()
+    }
+    
     private fun updateUI() {
         scanButton.text = if (isScanning) "Stop Scan" else "Start Scan"
-        startServerButton.isEnabled = selectedDevices.isNotEmpty()
-        statusTextView.text = "Selected devices: ${selectedDevices.size}"
+        
+        when {
+            isServerRunning -> {
+                startServerButton.text = "Stop HTTP Server"
+                startServerButton.isEnabled = true
+            }
+            selectedDevices.isNotEmpty() -> {
+                startServerButton.text = "Start HTTP Server"
+                startServerButton.isEnabled = true
+            }
+            else -> {
+                startServerButton.text = "Start HTTP Server"
+                startServerButton.isEnabled = false
+            }
+        }
+        
+        val deviceText = if (selectedDevices.isEmpty()) "No devices selected" else "Selected devices: ${selectedDevices.size}"
+        val serverText = if (isServerRunning) " • Server running" else ""
+        statusTextView.text = "$deviceText$serverText"
     }
     
     private fun hasRequiredPermissions(): Boolean {
