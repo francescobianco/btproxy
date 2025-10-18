@@ -7,11 +7,9 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.ktor.http.*
-import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
-import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -54,20 +52,15 @@ class HttpServerService : Service() {
     }
     
     private suspend fun connectToSelectedDevices(deviceAddresses: List<String>) {
-        deviceAddresses.forEach { address ->
-            serviceScope.launch {
-                val connected = bleConnectionManager.connectToDevice(address)
-                Log.d(TAG, "Connection to $address: $connected")
-            }
-        }
+        // Set target devices for automatic reconnection and queuing
+        bleConnectionManager.setTargetDevices(deviceAddresses)
+        Log.d(TAG, "Set target devices: ${deviceAddresses.joinToString(", ")}")
+        logToMainActivity("Target devices configured: ${deviceAddresses.size} devices")
     }
     
     private suspend fun startHttpServer(port: Int) {
         try {
             server = embeddedServer(Netty, port = port) {
-                install(ContentNegotiation) {
-                    json()
-                }
                 routing {
                     // Simple text ping - no JSON serialization
                     get("/ping") {
@@ -92,51 +85,50 @@ class HttpServerService : Service() {
                         }
                     }
                     
-                    // JSON ping endpoint
-                    get("/ping-json") {
-                        try {
-                            Log.d(TAG, "JSON ping endpoint called")
-                            call.respond(mapOf<String, Any>(
-                                "message" to "pong",
-                                "server" to "btproxy",
-                                "timestamp" to System.currentTimeMillis(),
-                                "version" to "1.0"
-                            ))
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error in /ping-json endpoint", e)
-                            logToMainActivity("ERROR in /ping-json: ${e.message}")
-                            call.respondText("JSON Error: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
-                        }
-                    }
                     
                     // Health check endpoint - no authentication required
                     get("/health") {
-                        val connectedDevices = bleConnectionManager.getConnectedDevices()
-                        call.respond(mapOf<String, Any>(
-                            "status" to "healthy",
-                            "server" to "running",
-                            "connected_devices_count" to connectedDevices.size,
-                            "timestamp" to System.currentTimeMillis()
-                        ))
+                        try {
+                            val connectedDevices = bleConnectionManager.getConnectedDevices()
+                            val response = "status: healthy\nserver: running\nconnected_devices_count: ${connectedDevices.size}\ntimestamp: ${System.currentTimeMillis()}"
+                            call.respondText(response, ContentType.Text.Plain)
+                        } catch (e: Exception) {
+                            call.respondText("ERROR: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
+                        }
                     }
                     
                     // Test endpoint - no authentication required
                     get("/test") {
-                        call.respond(mapOf<String, Any>(
-                            "message" to "BT Proxy HTTP Server is accessible",
-                            "port" to port,
-                            "endpoints" to listOf("/ping", "/health", "/test", "/status", "/devices"),
-                            "authenticated_endpoints" to listOf("/{macAddress}/{characteristicUuid}", "/connect/{macAddress}", "/disconnect/{macAddress}"),
-                            "auth_header_required" to "X-BtProxy"
-                        ))
+                        try {
+                            val response = """BT Proxy HTTP Server is accessible
+port: $port
+
+Public endpoints:
+/ping
+/health
+/test
+/status
+/devices
+
+Authenticated endpoints (require X-BtProxy header):
+/{macAddress}/{characteristicUuid}
+/connect/{macAddress}
+/disconnect/{macAddress}"""
+                            call.respondText(response, ContentType.Text.Plain)
+                        } catch (e: Exception) {
+                            call.respondText("ERROR: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
+                        }
                     }
                     
                     get("/status") {
-                        val connectedDevices = bleConnectionManager.getConnectedDevices()
-                        call.respond(mapOf<String, Any>(
-                            "status" to "running",
-                            "connected_devices" to connectedDevices
-                        ))
+                        try {
+                            val connectedDevices = bleConnectionManager.getConnectedDevices()
+                            val deviceList = if (connectedDevices.isEmpty()) "none" else connectedDevices.joinToString("\n")
+                            val response = "status: running\nconnected_devices:\n$deviceList"
+                            call.respondText(response, ContentType.Text.Plain)
+                        } catch (e: Exception) {
+                            call.respondText("ERROR: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
+                        }
                     }
                     
                     get("/{macAddress}/{characteristicUuid}") {
@@ -144,7 +136,7 @@ class HttpServerService : Service() {
                         val characteristicUuid = call.parameters["characteristicUuid"]!!
                         
                         if (!bleConnectionManager.isDeviceConnected(macAddress)) {
-                            call.respond(HttpStatusCode.NotFound, mapOf<String, String>("error" to "Device not connected"))
+                            call.respondText("ERROR: Device not connected", ContentType.Text.Plain, HttpStatusCode.NotFound)
                             return@get
                         }
                         
@@ -154,7 +146,7 @@ class HttpServerService : Service() {
                             .getString("auth_token", "secret") ?: "secret"
                         
                         if (authHeader != expectedToken) {
-                            call.respond(HttpStatusCode.Unauthorized, mapOf<String, String>("error" to "Invalid authentication token"))
+                            call.respondText("ERROR: Invalid authentication token", ContentType.Text.Plain, HttpStatusCode.Unauthorized)
                             return@get
                         }
                         
@@ -162,13 +154,10 @@ class HttpServerService : Service() {
                         if (data != null) {
                             val hexString = data.joinToString(" ") { "%02X".format(it) }
                             logToMainActivity("GET /$macAddress/$characteristicUuid -> $hexString")
-                            call.respond(mapOf<String, Any>(
-                                "success" to true,
-                                "data" to hexString
-                            ))
+                            call.respondText(hexString, ContentType.Text.Plain)
                         } else {
                             logToMainActivity("GET /$macAddress/$characteristicUuid -> FAILED")
-                            call.respond(HttpStatusCode.InternalServerError, mapOf<String, String>("error" to "Failed to read characteristic"))
+                            call.respondText("ERROR: Failed to read characteristic", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
                         }
                     }
                     
@@ -182,12 +171,12 @@ class HttpServerService : Service() {
                             .getString("auth_token", "secret") ?: "secret"
                         
                         if (authHeader != expectedToken) {
-                            call.respond(HttpStatusCode.Unauthorized, mapOf<String, String>("error" to "Invalid authentication token"))
+                            call.respondText("ERROR: Invalid authentication token", ContentType.Text.Plain, HttpStatusCode.Unauthorized)
                             return@post
                         }
                         
                         if (!bleConnectionManager.isDeviceConnected(macAddress)) {
-                            call.respond(HttpStatusCode.NotFound, mapOf<String, String>("error" to "Device not connected"))
+                            call.respondText("ERROR: Device not connected", ContentType.Text.Plain, HttpStatusCode.NotFound)
                             return@post
                         }
                         
@@ -202,44 +191,32 @@ class HttpServerService : Service() {
                                 val success = bleConnectionManager.writeCharacteristic(macAddress, characteristicUuid, data)
                                 if (success) {
                                     logToMainActivity("POST /$macAddress/$characteristicUuid -> SUCCESS")
-                                    call.respond(mapOf<String, Boolean>("success" to true))
+                                    call.respondText("OK", ContentType.Text.Plain)
                                 } else {
                                     logToMainActivity("POST /$macAddress/$characteristicUuid -> FAILED")
-                                    call.respond(HttpStatusCode.InternalServerError, mapOf<String, String>("error" to "Failed to write characteristic"))
+                                    call.respondText("ERROR: Failed to write characteristic", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
                                 }
                             } else {
                                 logToMainActivity("POST /$macAddress/$characteristicUuid -> INVALID_FORMAT")
-                                call.respond(HttpStatusCode.BadRequest, mapOf<String, String>("error" to "Invalid data format. Use space-separated hex bytes (e.g., 'A0 81 D0')"))
+                                call.respondText("ERROR: Invalid data format. Use space-separated hex bytes (e.g., 'A0 81 D0')", ContentType.Text.Plain, HttpStatusCode.BadRequest)
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "Error processing POST request", e)
                             logToMainActivity("POST /$macAddress/$characteristicUuid -> ERROR: ${e.message}")
-                            call.respond(HttpStatusCode.BadRequest, mapOf<String, String>("error" to "Invalid request: ${e.message}"))
+                            call.respondText("ERROR: Invalid request: ${e.message}", ContentType.Text.Plain, HttpStatusCode.BadRequest)
                         }
                     }
                     
                     get("/devices") {
-                        val connectedDevices = bleConnectionManager.getConnectedDevices()
-                        call.respond(mapOf<String, List<String>>("devices" to connectedDevices))
+                        try {
+                            val connectedDevices = bleConnectionManager.getConnectedDevices()
+                            val deviceList = if (connectedDevices.isEmpty()) "" else connectedDevices.joinToString("\n")
+                            call.respondText(deviceList, ContentType.Text.Plain)
+                        } catch (e: Exception) {
+                            call.respondText("ERROR: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
+                        }
                     }
                     
-                    post("/connect/{macAddress}") {
-                        val macAddress = call.parameters["macAddress"]!!
-                        val connected = bleConnectionManager.connectToDevice(macAddress)
-                        call.respond(mapOf<String, Any>(
-                            "success" to connected,
-                            "device" to macAddress
-                        ))
-                    }
-                    
-                    post("/disconnect/{macAddress}") {
-                        val macAddress = call.parameters["macAddress"]!!
-                        bleConnectionManager.disconnectDevice(macAddress)
-                        call.respond(mapOf<String, Any>(
-                            "success" to true,
-                            "device" to macAddress
-                        ))
-                    }
                 }
             }.start(wait = false)
             
@@ -319,7 +296,7 @@ class HttpServerService : Service() {
         super.onDestroy()
         serviceScope.launch {
             server?.stop(1000, 2000)
-            bleConnectionManager.disconnectAll()
+            bleConnectionManager.shutdown()
         }
         serviceJob.cancel()
     }

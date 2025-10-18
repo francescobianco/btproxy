@@ -46,9 +46,19 @@ BT Proxy is an Android application that bridges the gap between Bluetooth Low En
 
 ## API Reference
 
-All API calls require the `X-BtProxy` header with your configured authentication token.
+**All API responses are in PLAIN TEXT format - no JSON is used.**
 
-### Authentication
+### Public Endpoints (No Authentication Required)
+```
+GET /ping           → "pong"
+GET /health         → "status: healthy\nserver: running\nconnected_devices_count: 2"
+GET /test           → Server info and available endpoints
+```
+
+### Authenticated Endpoints
+
+All authenticated API calls require the `X-BtProxy` header with your configured token.
+
 ```
 Headers:
 X-BtProxy: your_auth_token
@@ -57,16 +67,16 @@ X-BtProxy: your_auth_token
 ### Read BLE Characteristic
 ```
 GET /{mac_address}/{characteristic_uuid}
+X-BtProxy: secret
 
 Example:
 GET /AA:BB:CC:DD:EE:FF/12345678-1234-1234-1234-123456789abc
-X-BtProxy: secret
 
-Response:
-{
-  "success": true,
-  "data": "A0 81 D0"
-}
+Response (plain text):
+A0 81 D0
+
+Error Response:
+ERROR: Device not connected
 ```
 
 ### Write BLE Characteristic
@@ -77,57 +87,31 @@ Content-Type: text/plain
 
 Body: A0 81 D0
 
-Response:
-{
-  "success": true
-}
+Response (plain text):
+OK
+
+Error Response:
+ERROR: Failed to write characteristic
 ```
 
 ### Server Status
 ```
 GET /status
-X-BtProxy: secret
 
-Response:
-{
-  "status": "running",
-  "connected_devices": ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"]
-}
+Response (plain text):
+status: running
+connected_devices:
+AA:BB:CC:DD:EE:FF
+11:22:33:44:55:66
 ```
 
 ### List Connected Devices
 ```
 GET /devices
-X-BtProxy: secret
 
-Response:
-{
-  "devices": ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"]
-}
-```
-
-### Manual Device Connection
-```
-POST /connect/{mac_address}
-X-BtProxy: secret
-
-Response:
-{
-  "success": true,
-  "device": "AA:BB:CC:DD:EE:FF"
-}
-```
-
-### Disconnect Device
-```
-POST /disconnect/{mac_address}
-X-BtProxy: secret
-
-Response:
-{
-  "success": true,
-  "device": "AA:BB:CC:DD:EE:FF"
-}
+Response (plain text - one MAC per line):
+AA:BB:CC:DD:EE:FF
+11:22:33:44:55:66
 ```
 
 ## Data Format
@@ -143,24 +127,49 @@ BT Proxy uses **space-separated hexadecimal bytes** format, compatible with `blu
 
 ### Using curl
 ```bash
+# Test connectivity (no auth required)
+curl http://192.168.1.100:8080/ping
+# Response: pong
+
+# Check server status
+curl http://192.168.1.100:8080/health
+# Response: status: healthy
+#           server: running
+#           connected_devices_count: 2
+
 # Read a characteristic
 curl -H "X-BtProxy: secret" \
   http://192.168.1.100:8080/AA:BB:CC:DD:EE:FF/12345678-1234-1234-1234-123456789abc
+# Response: A0 81 D0
 
 # Write to a characteristic
 curl -X POST \
   -H "X-BtProxy: secret" \
   -d "A0 81 D0" \
   http://192.168.1.100:8080/AA:BB:CC:DD:EE:FF/12345678-1234-1234-1234-123456789abc
+# Response: OK
+
+# List connected devices
+curl http://192.168.1.100:8080/devices
+# Response: AA:BB:CC:DD:EE:FF
+#           11:22:33:44:55:66
 ```
 
 ### Using JavaScript
 ```javascript
+// Read characteristic (plain text response)
 const response = await fetch('http://192.168.1.100:8080/AA:BB:CC:DD:EE:FF/uuid', {
   headers: { 'X-BtProxy': 'secret' }
 });
-const data = await response.json();
-console.log('BLE data:', data.data);
+const hexData = await response.text();
+console.log('BLE data:', hexData); // "A0 81 D0"
+
+// Write characteristic
+await fetch('http://192.168.1.100:8080/AA:BB:CC:DD:EE:FF/uuid', {
+  method: 'POST',
+  headers: { 'X-BtProxy': 'secret' },
+  body: 'FF 00 1A'
+});
 ```
 
 ### Using Python
@@ -168,8 +177,15 @@ console.log('BLE data:', data.data);
 import requests
 
 headers = {'X-BtProxy': 'secret'}
+
+# Read characteristic
 response = requests.get('http://192.168.1.100:8080/AA:BB:CC:DD:EE:FF/uuid', headers=headers)
-print('BLE data:', response.json()['data'])
+hex_data = response.text
+print('BLE data:', hex_data)  # "A0 81 D0"
+
+# Write characteristic
+requests.post('http://192.168.1.100:8080/AA:BB:CC:DD:EE:FF/uuid', 
+              headers=headers, data='FF 00 1A')
 ```
 
 ## Requirements

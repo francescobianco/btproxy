@@ -7,6 +7,13 @@ import kotlinx.coroutines.*
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 
+data class QueuedMessage(
+    val macAddress: String,
+    val characteristicUuid: String,
+    val data: ByteArray,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
 class BleConnectionManager(private val context: Context) {
     
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -14,8 +21,134 @@ class BleConnectionManager(private val context: Context) {
     private val connections = ConcurrentHashMap<String, BluetoothGatt>()
     private val connectionCallbacks = ConcurrentHashMap<String, BleGattCallback>()
     
+    // Reconnection and message queue system
+    private val reconnectionScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val targetDevices = mutableSetOf<String>() // Devices we should maintain connection to
+    private val messageQueue = ConcurrentHashMap<String, MutableList<QueuedMessage>>() // Per-device message queues
+    private val reconnectionJobs = ConcurrentHashMap<String, Job>() // Ongoing reconnection attempts
+    
     companion object {
         private const val TAG = "BleConnectionManager"
+        private const val RECONNECTION_DELAY_MS = 5000L // 5 seconds between reconnection attempts
+        private const val MAX_RECONNECTION_ATTEMPTS = -1 // Infinite attempts (-1)
+        private const val MAX_QUEUED_MESSAGES = 100 // Max messages per device
+    }
+    
+    fun addTargetDevice(macAddress: String) {
+        synchronized(targetDevices) {
+            targetDevices.add(macAddress)
+            messageQueue[macAddress] = mutableListOf()
+        }
+        Log.d(TAG, "Added target device: $macAddress")
+    }
+    
+    fun removeTargetDevice(macAddress: String) {
+        synchronized(targetDevices) {
+            targetDevices.remove(macAddress)
+            messageQueue.remove(macAddress)
+            reconnectionJobs[macAddress]?.cancel()
+            reconnectionJobs.remove(macAddress)
+        }
+        disconnectDevice(macAddress)
+        Log.d(TAG, "Removed target device: $macAddress")
+    }
+    
+    fun setTargetDevices(addresses: List<String>) {
+        synchronized(targetDevices) {
+            // Remove old devices
+            val toRemove = targetDevices.toList() - addresses.toSet()
+            toRemove.forEach { removeTargetDevice(it) }
+            
+            // Add new devices
+            addresses.forEach { addTargetDevice(it) }
+        }
+        
+        // Start connections to new devices
+        addresses.forEach { macAddress ->
+            if (!isDeviceConnected(macAddress)) {
+                startReconnectionProcess(macAddress)
+            }
+        }
+    }
+    
+    private fun startReconnectionProcess(macAddress: String) {
+        // Cancel any existing reconnection job for this device
+        reconnectionJobs[macAddress]?.cancel()
+        
+        val job = reconnectionScope.launch {
+            var attempts = 0
+            while (targetDevices.contains(macAddress) && !isDeviceConnected(macAddress)) {
+                attempts++
+                Log.d(TAG, "Reconnection attempt $attempts for $macAddress")
+                
+                try {
+                    val connected = connectToDevice(macAddress)
+                    if (connected) {
+                        Log.d(TAG, "Successfully reconnected to $macAddress")
+                        // Process queued messages for this device
+                        processQueuedMessages(macAddress)
+                        break
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Reconnection attempt $attempts failed for $macAddress", e)
+                }
+                
+                // Check if we should continue attempting
+                if (MAX_RECONNECTION_ATTEMPTS > 0 && attempts >= MAX_RECONNECTION_ATTEMPTS) {
+                    Log.w(TAG, "Max reconnection attempts reached for $macAddress")
+                    break
+                }
+                
+                // Wait before next attempt
+                delay(RECONNECTION_DELAY_MS)
+            }
+        }
+        
+        reconnectionJobs[macAddress] = job
+    }
+    
+    private suspend fun processQueuedMessages(macAddress: String) {
+        val queue = messageQueue[macAddress] ?: return
+        
+        synchronized(queue) {
+            val messages = queue.toList()
+            queue.clear()
+            
+            Log.d(TAG, "Processing ${messages.size} queued messages for $macAddress")
+            
+            messages.forEach { message ->
+                try {
+                    val success = writeCharacteristic(message.macAddress, message.characteristicUuid, message.data)
+                    if (success) {
+                        Log.d(TAG, "Successfully sent queued message to $macAddress/${message.characteristicUuid}")
+                    } else {
+                        Log.w(TAG, "Failed to send queued message to $macAddress/${message.characteristicUuid}")
+                        // Re-queue the message if write failed
+                        queueMessage(message)
+                    }
+                    // Small delay between messages to avoid overwhelming the device
+                    delay(100)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error sending queued message to $macAddress", e)
+                    // Re-queue the message on error
+                    queueMessage(message)
+                }
+            }
+        }
+    }
+    
+    private fun queueMessage(message: QueuedMessage) {
+        val queue = messageQueue[message.macAddress] ?: return
+        
+        synchronized(queue) {
+            // Remove oldest messages if queue is full
+            while (queue.size >= MAX_QUEUED_MESSAGES) {
+                queue.removeAt(0)
+            }
+            queue.add(message)
+        }
+        
+        Log.d(TAG, "Queued message for ${message.macAddress}/${message.characteristicUuid} (queue size: ${queue.size})")
     }
     
     suspend fun connectToDevice(macAddress: String): Boolean = withContext(Dispatchers.Main) {
@@ -78,8 +211,27 @@ class BleConnectionManager(private val context: Context) {
     }
     
     suspend fun writeCharacteristic(macAddress: String, characteristicUuid: String, data: ByteArray): Boolean {
-        val gatt = connections[macAddress] ?: return false
-        val callback = connectionCallbacks[macAddress] ?: return false
+        val gatt = connections[macAddress]
+        val callback = connectionCallbacks[macAddress]
+        
+        // If device is not connected and it's a target device, queue the message
+        if (gatt == null || callback == null || !callback.isConnected) {
+            if (targetDevices.contains(macAddress)) {
+                val queuedMessage = QueuedMessage(macAddress, characteristicUuid, data)
+                queueMessage(queuedMessage)
+                
+                // Start reconnection if not already in progress
+                if (!reconnectionJobs.containsKey(macAddress)) {
+                    startReconnectionProcess(macAddress)
+                }
+                
+                Log.d(TAG, "Device $macAddress not connected, message queued")
+                return true // Return true to indicate message was queued successfully
+            } else {
+                Log.e(TAG, "Device $macAddress not connected and not in target devices")
+                return false
+            }
+        }
         
         return try {
             val serviceUuid = findServiceForCharacteristic(gatt, characteristicUuid)
@@ -136,6 +288,26 @@ class BleConnectionManager(private val context: Context) {
         }
     }
     
+    fun shutdown() {
+        // Cancel all reconnection jobs
+        reconnectionJobs.values.forEach { it.cancel() }
+        reconnectionJobs.clear()
+        
+        // Clear all data structures
+        synchronized(targetDevices) {
+            targetDevices.clear()
+            messageQueue.clear()
+        }
+        
+        // Disconnect all devices
+        disconnectAll()
+        
+        // Cancel the reconnection scope
+        reconnectionScope.cancel()
+        
+        Log.d(TAG, "BleConnectionManager shut down")
+    }
+    
     private inner class BleGattCallback(private val macAddress: String) : BluetoothGattCallback() {
         
         var isConnected = false
@@ -158,6 +330,12 @@ class BleConnectionManager(private val context: Context) {
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.d(TAG, "Disconnected from $macAddress")
                     isConnected = false
+                    
+                    // Start automatic reconnection if this is a target device
+                    if (targetDevices.contains(macAddress)) {
+                        Log.d(TAG, "Starting automatic reconnection for target device $macAddress")
+                        startReconnectionProcess(macAddress)
+                    }
                 }
             }
         }
