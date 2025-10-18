@@ -110,29 +110,32 @@ class BleConnectionManager(private val context: Context) {
     private suspend fun processQueuedMessages(macAddress: String) {
         val queue = messageQueue[macAddress] ?: return
         
-        synchronized(queue) {
-            val messages = queue.toList()
+        // Extract messages from queue in synchronized block
+        val messages = synchronized(queue) {
+            val messagesCopy = queue.toList()
             queue.clear()
-            
-            Log.d(TAG, "Processing ${messages.size} queued messages for $macAddress")
-            
-            messages.forEach { message ->
-                try {
-                    val success = writeCharacteristic(message.macAddress, message.characteristicUuid, message.data)
-                    if (success) {
-                        Log.d(TAG, "Successfully sent queued message to $macAddress/${message.characteristicUuid}")
-                    } else {
-                        Log.w(TAG, "Failed to send queued message to $macAddress/${message.characteristicUuid}")
-                        // Re-queue the message if write failed
-                        queueMessage(message)
-                    }
-                    // Small delay between messages to avoid overwhelming the device
-                    delay(100)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error sending queued message to $macAddress", e)
-                    // Re-queue the message on error
+            messagesCopy
+        }
+        
+        Log.d(TAG, "Processing ${messages.size} queued messages for $macAddress")
+        
+        // Process messages outside of synchronized block
+        messages.forEach { message ->
+            try {
+                val success = writeCharacteristicDirect(message.macAddress, message.characteristicUuid, message.data)
+                if (success) {
+                    Log.d(TAG, "Successfully sent queued message to $macAddress/${message.characteristicUuid}")
+                } else {
+                    Log.w(TAG, "Failed to send queued message to $macAddress/${message.characteristicUuid}")
+                    // Re-queue the message if write failed
                     queueMessage(message)
                 }
+                // Small delay between messages to avoid overwhelming the device
+                delay(100)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error sending queued message to $macAddress", e)
+                // Re-queue the message on error
+                queueMessage(message)
             }
         }
     }
@@ -232,6 +235,13 @@ class BleConnectionManager(private val context: Context) {
                 return false
             }
         }
+        
+        return writeCharacteristicDirect(macAddress, characteristicUuid, data)
+    }
+    
+    private suspend fun writeCharacteristicDirect(macAddress: String, characteristicUuid: String, data: ByteArray): Boolean {
+        val gatt = connections[macAddress] ?: return false
+        val callback = connectionCallbacks[macAddress] ?: return false
         
         return try {
             val serviceUuid = findServiceForCharacteristic(gatt, characteristicUuid)
