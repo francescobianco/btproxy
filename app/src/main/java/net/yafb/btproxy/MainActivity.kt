@@ -88,7 +88,11 @@ class MainActivity : AppCompatActivity() {
         checkPermissions()
         
         // Register log receiver
-        registerReceiver(logReceiver, IntentFilter("net.yafb.btproxy.LOG"))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(logReceiver, IntentFilter("net.yafb.btproxy.LOG"), Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(logReceiver, IntentFilter("net.yafb.btproxy.LOG"))
+        }
         
         addLogEntry("BT Proxy started", System.currentTimeMillis())
     }

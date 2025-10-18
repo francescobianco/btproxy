@@ -7,9 +7,11 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.ktor.http.*
+import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
+import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -60,7 +62,42 @@ class HttpServerService : Service() {
     private suspend fun startHttpServer(port: Int) {
         try {
             server = embeddedServer(Netty, port = port) {
+                install(ContentNegotiation) {
+                    json()
+                }
                 routing {
+                    // Ping endpoint - no authentication required
+                    get("/ping") {
+                        call.respond(mapOf<String, Any>(
+                            "message" to "pong",
+                            "server" to "btproxy",
+                            "timestamp" to System.currentTimeMillis(),
+                            "version" to "1.0"
+                        ))
+                    }
+                    
+                    // Health check endpoint - no authentication required
+                    get("/health") {
+                        val connectedDevices = bleConnectionManager.getConnectedDevices()
+                        call.respond(mapOf<String, Any>(
+                            "status" to "healthy",
+                            "server" to "running",
+                            "connected_devices_count" to connectedDevices.size,
+                            "timestamp" to System.currentTimeMillis()
+                        ))
+                    }
+                    
+                    // Test endpoint - no authentication required
+                    get("/test") {
+                        call.respond(mapOf<String, Any>(
+                            "message" to "BT Proxy HTTP Server is accessible",
+                            "port" to port,
+                            "endpoints" to listOf("/ping", "/health", "/test", "/status", "/devices"),
+                            "authenticated_endpoints" to listOf("/{macAddress}/{characteristicUuid}", "/connect/{macAddress}", "/disconnect/{macAddress}"),
+                            "auth_header_required" to "X-BtProxy"
+                        ))
+                    }
+                    
                     get("/status") {
                         val connectedDevices = bleConnectionManager.getConnectedDevices()
                         call.respond(mapOf<String, Any>(
