@@ -19,8 +19,6 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import java.text.SimpleDateFormat
 import java.util.*
-import android.text.TextWatcher
-import android.text.Editable
 
 class MainActivity : AppCompatActivity() {
     
@@ -30,8 +28,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var deviceAdapter: DeviceAdapter
     private lateinit var scanButton: Button
     private lateinit var startServerButton: Button
-    private lateinit var portEditText: EditText
-    private lateinit var authTokenEditText: EditText
     private lateinit var statusTextView: TextView
     private lateinit var logTextView: TextView
     
@@ -42,10 +38,6 @@ class MainActivity : AppCompatActivity() {
     private var isServerRunning = false
     private val logEntries = mutableListOf<String>()
     private val dateFormatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-    
-    private val saveConfigRunnable = Runnable {
-        saveAppState()
-    }
     
     private val logReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -97,8 +89,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val REQUEST_PERMISSIONS = 1
         private const val PREFS_NAME = "btproxy_app_state"
-        private const val PREF_PORT = "server_port"
-        private const val PREF_AUTH_TOKEN = "auth_token"
         private const val PREF_SELECTED_DEVICES = "selected_devices"
         private const val PREF_SERVER_RUNNING = "server_running"
         private const val PREF_DISCOVERED_DEVICE_ADDRESSES = "discovered_device_addresses"
@@ -142,11 +132,9 @@ class MainActivity : AppCompatActivity() {
     private fun initViews() {
         scanButton = findViewById(R.id.scanButton)
         startServerButton = findViewById(R.id.startServerButton)
-        portEditText = findViewById(R.id.portEditText)
-        authTokenEditText = findViewById(R.id.authTokenEditText)
         statusTextView = findViewById(R.id.statusTextView)
         logTextView = findViewById(R.id.logTextView)
-        
+
         val recyclerView = findViewById<RecyclerView>(R.id.devicesRecyclerView)
         deviceAdapter = DeviceAdapter(discoveredDevices, selectedDevices) { device, isSelected ->
             if (isSelected) {
@@ -155,51 +143,24 @@ class MainActivity : AppCompatActivity() {
                 selectedDevices.remove(device.address)
             }
             updateUI()
-            saveAppState() // Save when device selection changes
+            saveAppState()
         }
-        
+
         recyclerView.layoutManager = LinearLayoutManager(this)
         recyclerView.adapter = deviceAdapter
-        
+
         scanButton.setOnClickListener {
-            if (isScanning) {
-                stopScan()
-            } else {
-                startScan()
-            }
+            if (isScanning) stopScan() else startScan()
         }
-        
+
         startServerButton.setOnClickListener {
-            if (isServerRunning) {
-                stopHttpServer()
-            } else {
-                startHttpServer()
-            }
+            if (isServerRunning) stopHttpServer() else startHttpServer()
         }
-        
-        portEditText.setText("8080")
-        authTokenEditText.setText("secret")
-        
-        // Add text watchers to save configuration changes
-        portEditText.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: Editable?) {
-                // Save with a small delay to avoid excessive saves while typing
-                portEditText.removeCallbacks(saveConfigRunnable)
-                portEditText.postDelayed(saveConfigRunnable, 1000)
-            }
-        })
-        
-        authTokenEditText.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: Editable?) {
-                authTokenEditText.removeCallbacks(saveConfigRunnable)
-                authTokenEditText.postDelayed(saveConfigRunnable, 1000)
-            }
-        })
-        
+
+        findViewById<Button>(R.id.settingsButton).setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
+
         updateUI()
     }
     
@@ -256,15 +217,10 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun startHttpServer() {
-        val port = portEditText.text.toString().toIntOrNull() ?: 8080
-        val authToken = authTokenEditText.text.toString().ifBlank { "secret" }
-        
-        // Save auth token to shared preferences
-        getSharedPreferences("btproxy_prefs", MODE_PRIVATE)
-            .edit()
-            .putString("auth_token", authToken)
-            .apply()
-        
+        val prefs = getSharedPreferences(SettingsActivity.PREFS_NAME, MODE_PRIVATE)
+        val port = prefs.getString(SettingsActivity.PREF_PORT, "8080")?.toIntOrNull() ?: 8080
+        val authToken = prefs.getString(SettingsActivity.PREF_AUTH_TOKEN, "secret") ?: "secret"
+
         val intent = Intent(this, HttpServerService::class.java).apply {
             putExtra("port", port)
             putStringArrayListExtra("selectedDevices", ArrayList(selectedDevices))
@@ -356,8 +312,6 @@ class MainActivity : AppCompatActivity() {
     private fun saveAppState() {
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         prefs.edit().apply {
-            putString(PREF_PORT, portEditText.text.toString())
-            putString(PREF_AUTH_TOKEN, authTokenEditText.text.toString())
             putStringSet(PREF_SELECTED_DEVICES, selectedDevices.toSet())
             putBoolean(PREF_SERVER_RUNNING, isServerRunning)
             
@@ -371,14 +325,7 @@ class MainActivity : AppCompatActivity() {
     
     private fun loadAppState() {
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        
-        // Load configuration
-        val savedPort = prefs.getString(PREF_PORT, "8080") ?: "8080"
-        val savedAuthToken = prefs.getString(PREF_AUTH_TOKEN, "secret") ?: "secret"
-        
-        portEditText.setText(savedPort)
-        authTokenEditText.setText(savedAuthToken)
-        
+
         // Load selected devices
         val savedSelectedDevices = prefs.getStringSet(PREF_SELECTED_DEVICES, emptySet()) ?: emptySet()
         selectedDevices.clear()

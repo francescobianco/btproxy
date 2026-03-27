@@ -222,6 +222,7 @@ Authenticated endpoints (require X-BtProxy header):
             
             Log.d(TAG, "HTTP Server started on port $port")
             logToMainActivity("HTTP Server started successfully on port $port")
+            MonitoringHelper.postEvent(this@HttpServerService, "server_started", mapOf("port" to port))
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start HTTP server", e)
@@ -255,6 +256,7 @@ Authenticated endpoints (require X-BtProxy header):
                 server = null
                 Log.d(TAG, "HTTP server stopped")
                 logToMainActivity("HTTP server stopped")
+                MonitoringHelper.postEvent(this@HttpServerService, "server_stopped")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping HTTP server", e)

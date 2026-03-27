@@ -35,51 +35,12 @@
         android:layout_weight="1"
         android:layout_marginBottom="16dp" />
 
-    <LinearLayout
+    <Button
+        android:id="@+id/settingsButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:layout_marginBottom="8dp">
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Port:"
-            android:layout_gravity="center_vertical"
-            android:layout_marginEnd="8dp" />
-
-        <EditText
-            android:id="@+id/portEditText"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:inputType="number"
-            android:hint="8080" />
-
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:layout_marginBottom="8dp">
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Auth Token:"
-            android:layout_gravity="center_vertical"
-            android:layout_marginEnd="8dp" />
-
-        <EditText
-            android:id="@+id/authTokenEditText"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:inputType="text"
-            android:hint="secret" />
-
-    </LinearLayout>
+        android:text="Settings"
+        android:layout_marginBottom="8dp" />
 
     <Button
         android:id="@+id/startServerButton"

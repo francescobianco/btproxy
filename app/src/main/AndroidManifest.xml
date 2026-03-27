@@ -47,6 +47,13 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="Settings"
+            android:theme="@style/Theme.AppCompat.Light.DarkActionBar"
+            android:parentActivityName=".MainActivity" />
+
         <service
             android:name=".HttpServerService"
             android:foregroundServiceType="connectedDevice"
