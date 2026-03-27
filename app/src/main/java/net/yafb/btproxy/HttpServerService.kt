@@ -14,6 +14,7 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.coroutines.*
+import org.json.JSONObject
 
 class HttpServerService : Service() {
     
@@ -112,6 +113,8 @@ Public endpoints:
 
 Authenticated endpoints (require X-BtProxy header):
 /{macAddress}/{characteristicUuid}
+/{macAddress}/{characteristicUuid}/subscribe
+/{macAddress}/{characteristicUuid}/poll
 /connect/{macAddress}
 /disconnect/{macAddress}"""
                             call.respondText(response, ContentType.Text.Plain)
@@ -196,6 +199,123 @@ Authenticated endpoints (require X-BtProxy header):
                             call.respondText("ERROR: Invalid request: ${e.message}", ContentType.Text.Plain, HttpStatusCode.BadRequest)
                         }
                     }
+
+                    post("/{macAddress}/{characteristicUuid}/subscribe") {
+                        val macAddress = call.parameters["macAddress"]!!
+                        val characteristicUuid = call.parameters["characteristicUuid"]!!
+
+                        if (!isAuthenticated(call.request)) {
+                            call.respondText("ERROR: Invalid authentication token", ContentType.Text.Plain, HttpStatusCode.Unauthorized)
+                            return@post
+                        }
+
+                        if (!bleConnectionManager.isDeviceConnected(macAddress)) {
+                            call.respondText("ERROR: Device not connected", ContentType.Text.Plain, HttpStatusCode.NotFound)
+                            return@post
+                        }
+
+                        try {
+                            val body = call.receiveText()
+                            val clientId = JSONObject(body).optString("clientId").trim()
+                            if (clientId.isBlank()) {
+                                call.respondText("ERROR: Missing clientId", ContentType.Text.Plain, HttpStatusCode.BadRequest)
+                                return@post
+                            }
+
+                            val result = bleConnectionManager.subscribeToCharacteristic(macAddress, characteristicUuid, clientId)
+                            if (!result.success) {
+                                val status = if (result.reason?.contains("not support", ignoreCase = true) == true ||
+                                    result.reason?.contains("not found", ignoreCase = true) == true
+                                ) {
+                                    HttpStatusCode.BadRequest
+                                } else {
+                                    HttpStatusCode.InternalServerError
+                                }
+                                logToMainActivity("SUBSCRIBE /$macAddress/$characteristicUuid client=$clientId -> FAILED: ${result.reason}")
+                                call.respondText("ERROR: ${result.reason ?: "Subscribe failed"}", ContentType.Text.Plain, status)
+                                return@post
+                            }
+
+                            logToMainActivity("SUBSCRIBE /$macAddress/$characteristicUuid client=$clientId -> OK")
+                            call.respondText(
+                                buildSubscriptionResponse(macAddress, characteristicUuid, clientId, true, result.queueDepth),
+                                ContentType.Application.Json
+                            )
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error processing subscribe request", e)
+                            call.respondText("ERROR: Invalid request: ${e.message}", ContentType.Text.Plain, HttpStatusCode.BadRequest)
+                        }
+                    }
+
+                    delete("/{macAddress}/{characteristicUuid}/subscribe") {
+                        val macAddress = call.parameters["macAddress"]!!
+                        val characteristicUuid = call.parameters["characteristicUuid"]!!
+
+                        if (!isAuthenticated(call.request)) {
+                            call.respondText("ERROR: Invalid authentication token", ContentType.Text.Plain, HttpStatusCode.Unauthorized)
+                            return@delete
+                        }
+
+                        if (!bleConnectionManager.isDeviceConnected(macAddress)) {
+                            call.respondText("ERROR: Device not connected", ContentType.Text.Plain, HttpStatusCode.NotFound)
+                            return@delete
+                        }
+
+                        val clientId = call.request.queryParameters["clientId"]?.trim().orEmpty()
+                        if (clientId.isBlank()) {
+                            call.respondText("ERROR: Missing clientId", ContentType.Text.Plain, HttpStatusCode.BadRequest)
+                            return@delete
+                        }
+
+                        val removed = bleConnectionManager.unsubscribeFromCharacteristic(macAddress, characteristicUuid, clientId)
+                        if (!removed) {
+                            call.respondText("ERROR: Subscription not found", ContentType.Text.Plain, HttpStatusCode.NotFound)
+                            return@delete
+                        }
+
+                        logToMainActivity("UNSUBSCRIBE /$macAddress/$characteristicUuid client=$clientId -> OK")
+                        call.respondText(
+                            buildUnsubscribeResponse(macAddress, characteristicUuid, clientId),
+                            ContentType.Application.Json
+                        )
+                    }
+
+                    get("/{macAddress}/{characteristicUuid}/poll") {
+                        val macAddress = call.parameters["macAddress"]!!
+                        val characteristicUuid = call.parameters["characteristicUuid"]!!
+
+                        if (!isAuthenticated(call.request)) {
+                            call.respondText("ERROR: Invalid authentication token", ContentType.Text.Plain, HttpStatusCode.Unauthorized)
+                            return@get
+                        }
+
+                        if (!bleConnectionManager.isDeviceConnected(macAddress)) {
+                            call.respondText("ERROR: Device not connected", ContentType.Text.Plain, HttpStatusCode.NotFound)
+                            return@get
+                        }
+
+                        val clientId = call.request.queryParameters["clientId"]?.trim().orEmpty()
+                        if (clientId.isBlank()) {
+                            call.respondText("ERROR: Missing clientId", ContentType.Text.Plain, HttpStatusCode.BadRequest)
+                            return@get
+                        }
+
+                        val waitMs = call.request.queryParameters["waitMs"]?.toLongOrNull()?.coerceIn(0L, 30000L) ?: 0L
+                        val result = bleConnectionManager.pollNotification(macAddress, characteristicUuid, clientId, waitMs)
+                        if (!result.subscribed) {
+                            call.respondText("ERROR: Subscription not found", ContentType.Text.Plain, HttpStatusCode.NotFound)
+                            return@get
+                        }
+
+                        val payloadHex = result.event?.payload?.joinToString(" ") { "%02X".format(it) }
+                        if (result.event != null) {
+                            logToMainActivity("POLL /$macAddress/$characteristicUuid client=$clientId -> $payloadHex")
+                        }
+                        call.respondText(
+                            buildPollResponse(macAddress, characteristicUuid, clientId, result, payloadHex),
+                            ContentType.Application.Json
+                        )
+                    }
                     
                     get("/devices/{macAddress}/characteristics") {
                         val macAddress = call.parameters["macAddress"]!!
@@ -266,6 +386,54 @@ Authenticated endpoints (require X-BtProxy header):
             Log.e(TAG, "Failed to parse space-separated hex string: $hexString", e)
             null
         }
+    }
+
+    private fun buildSubscriptionResponse(
+        macAddress: String,
+        characteristicUuid: String,
+        clientId: String,
+        subscribed: Boolean,
+        queueDepth: Int
+    ): String {
+        return JSONObject().apply {
+            put("macAddress", macAddress)
+            put("characteristicUuid", characteristicUuid)
+            put("clientId", clientId)
+            put("subscribed", subscribed)
+            put("queueDepth", queueDepth)
+            put("mode", "poll")
+        }.toString()
+    }
+
+    private fun buildUnsubscribeResponse(
+        macAddress: String,
+        characteristicUuid: String,
+        clientId: String
+    ): String {
+        return JSONObject().apply {
+            put("macAddress", macAddress)
+            put("characteristicUuid", characteristicUuid)
+            put("clientId", clientId)
+            put("subscribed", false)
+        }.toString()
+    }
+
+    private fun buildPollResponse(
+        macAddress: String,
+        characteristicUuid: String,
+        clientId: String,
+        result: PollResult,
+        payloadHex: String?
+    ): String {
+        return JSONObject().apply {
+            put("macAddress", macAddress)
+            put("characteristicUuid", characteristicUuid)
+            put("clientId", clientId)
+            put("hasMessage", result.event != null)
+            put("timestamp", result.event?.timestamp ?: JSONObject.NULL)
+            put("payloadHex", payloadHex ?: JSONObject.NULL)
+            put("queueDepth", result.queueDepth)
+        }.toString()
     }
     
     private suspend fun stopHttpServer() {

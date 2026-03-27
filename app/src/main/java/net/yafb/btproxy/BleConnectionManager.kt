@@ -14,6 +14,25 @@ data class QueuedMessage(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+data class NotificationEvent(
+    val macAddress: String,
+    val characteristicUuid: String,
+    val payload: ByteArray,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+data class SubscribeResult(
+    val success: Boolean,
+    val queueDepth: Int = 0,
+    val reason: String? = null
+)
+
+data class PollResult(
+    val subscribed: Boolean,
+    val event: NotificationEvent?,
+    val queueDepth: Int
+)
+
 class BleConnectionManager(private val context: Context) {
     
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -26,12 +45,17 @@ class BleConnectionManager(private val context: Context) {
     private val targetDevices = mutableSetOf<String>() // Devices we should maintain connection to
     private val messageQueue = ConcurrentHashMap<String, MutableList<QueuedMessage>>() // Per-device message queues
     private val reconnectionJobs = ConcurrentHashMap<String, Job>() // Ongoing reconnection attempts
+    private val notifySubscriptions = ConcurrentHashMap<String, MutableSet<String>>() // Per characteristic subscription clients
+    private val notificationQueues = ConcurrentHashMap<String, MutableList<NotificationEvent>>() // Per client/characteristic queue
     
     companion object {
         private const val TAG = "BleConnectionManager"
         private const val RECONNECTION_DELAY_MS = 5000L // 5 seconds between reconnection attempts
         private const val MAX_RECONNECTION_ATTEMPTS = -1 // Infinite attempts (-1)
         private const val MAX_QUEUED_MESSAGES = 100 // Max messages per device
+        private const val MAX_NOTIFICATION_EVENTS = 100
+        private val CLIENT_QUEUE_POLL_INTERVAL_MS = 100L
+        private val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }
     
     fun addTargetDevice(macAddress: String) {
@@ -49,6 +73,7 @@ class BleConnectionManager(private val context: Context) {
             reconnectionJobs[macAddress]?.cancel()
             reconnectionJobs.remove(macAddress)
         }
+        clearNotificationState(macAddress)
         disconnectDevice(macAddress)
         Log.d(TAG, "Removed target device: $macAddress")
     }
@@ -238,6 +263,126 @@ class BleConnectionManager(private val context: Context) {
         
         return writeCharacteristicDirect(macAddress, characteristicUuid, data)
     }
+
+    suspend fun subscribeToCharacteristic(macAddress: String, characteristicUuid: String, clientId: String): SubscribeResult {
+        val gatt = connections[macAddress] ?: return SubscribeResult(false, reason = "Device not connected")
+        val callback = connectionCallbacks[macAddress] ?: return SubscribeResult(false, reason = "Device not connected")
+        if (!callback.isConnected) {
+            return SubscribeResult(false, reason = "Device not connected")
+        }
+
+        val characteristic = getCharacteristic(gatt, characteristicUuid)
+            ?: return SubscribeResult(false, reason = "Characteristic not found")
+
+        if (!supportsNotify(characteristic)) {
+            return SubscribeResult(false, reason = "Characteristic does not support notify")
+        }
+
+        val subscriptionKey = subscriptionKey(macAddress, characteristicUuid)
+        val queueKey = notificationQueueKey(macAddress, characteristicUuid, clientId)
+        val clients = notifySubscriptions.getOrPut(subscriptionKey) { mutableSetOf() }
+        val shouldEnableBleNotify = synchronized(clients) {
+            val wasEmpty = clients.isEmpty()
+            clients.add(clientId)
+            wasEmpty
+        }
+        notificationQueues.putIfAbsent(queueKey, mutableListOf())
+
+        if (shouldEnableBleNotify) {
+            val enabled = setCharacteristicNotification(gatt, callback, characteristic, true)
+            if (!enabled) {
+                synchronized(clients) { clients.remove(clientId) }
+                if (clients.isEmpty()) {
+                    notifySubscriptions.remove(subscriptionKey)
+                }
+                notificationQueues.remove(queueKey)
+                return SubscribeResult(false, reason = "Failed to enable notify")
+            }
+        }
+
+        return SubscribeResult(true, queueDepth = getNotificationQueueDepth(macAddress, characteristicUuid, clientId))
+    }
+
+    suspend fun unsubscribeFromCharacteristic(macAddress: String, characteristicUuid: String, clientId: String): Boolean {
+        val subscriptionKey = subscriptionKey(macAddress, characteristicUuid)
+        val clients = notifySubscriptions[subscriptionKey] ?: return false
+        val queueKey = notificationQueueKey(macAddress, characteristicUuid, clientId)
+        var shouldDisableBleNotify = false
+
+        synchronized(clients) {
+            clients.remove(clientId)
+            shouldDisableBleNotify = clients.isEmpty()
+        }
+
+        notificationQueues.remove(queueKey)
+
+        if (shouldDisableBleNotify) {
+            notifySubscriptions.remove(subscriptionKey)
+            val gatt = connections[macAddress]
+            val callback = connectionCallbacks[macAddress]
+            val characteristic = gatt?.let { getCharacteristic(it, characteristicUuid) }
+            if (gatt != null && callback != null && characteristic != null) {
+                setCharacteristicNotification(gatt, callback, characteristic, false)
+            }
+        }
+
+        return true
+    }
+
+    suspend fun pollNotification(
+        macAddress: String,
+        characteristicUuid: String,
+        clientId: String,
+        waitMs: Long = 0L
+    ): PollResult {
+        if (!isSubscribed(macAddress, characteristicUuid, clientId)) {
+            return PollResult(subscribed = false, event = null, queueDepth = 0)
+        }
+
+        val queueKey = notificationQueueKey(macAddress, characteristicUuid, clientId)
+        val queue = notificationQueues.getOrPut(queueKey) { mutableListOf() }
+        val deadline = System.currentTimeMillis() + waitMs.coerceAtLeast(0L)
+
+        while (true) {
+            val event = synchronized(queue) {
+                if (queue.isEmpty()) {
+                    null
+                } else {
+                    queue.removeAt(0)
+                }
+            }
+
+            if (event != null) {
+                return PollResult(
+                    subscribed = true,
+                    event = event,
+                    queueDepth = synchronized(queue) { queue.size }
+                )
+            }
+
+            if (System.currentTimeMillis() >= deadline) {
+                return PollResult(
+                    subscribed = true,
+                    event = null,
+                    queueDepth = synchronized(queue) { queue.size }
+                )
+            }
+
+            delay(CLIENT_QUEUE_POLL_INTERVAL_MS)
+        }
+    }
+
+    fun getNotificationQueueDepth(macAddress: String, characteristicUuid: String, clientId: String): Int {
+        val queueKey = notificationQueueKey(macAddress, characteristicUuid, clientId)
+        val queue = notificationQueues[queueKey] ?: return 0
+        return synchronized(queue) { queue.size }
+    }
+
+    fun isSubscribed(macAddress: String, characteristicUuid: String, clientId: String): Boolean {
+        val subscriptionKey = subscriptionKey(macAddress, characteristicUuid)
+        val clients = notifySubscriptions[subscriptionKey] ?: return false
+        return synchronized(clients) { clientId in clients }
+    }
     
     private suspend fun writeCharacteristicDirect(macAddress: String, characteristicUuid: String, data: ByteArray): Boolean {
         val gatt = connections[macAddress] ?: return false
@@ -282,6 +427,115 @@ class BleConnectionManager(private val context: Context) {
             Log.e(TAG, "Permission denied when finding service", e)
             null
         }
+    }
+
+    private fun getCharacteristic(gatt: BluetoothGatt, characteristicUuid: String): BluetoothGattCharacteristic? {
+        val serviceUuid = findServiceForCharacteristic(gatt, characteristicUuid) ?: return null
+        val service = gatt.getService(UUID.fromString(serviceUuid)) ?: return null
+        return service.getCharacteristic(UUID.fromString(characteristicUuid))
+    }
+
+    private fun supportsNotify(characteristic: BluetoothGattCharacteristic): Boolean {
+        return characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0 ||
+            characteristic.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0
+    }
+
+    private suspend fun setCharacteristicNotification(
+        gatt: BluetoothGatt,
+        callback: BleGattCallback,
+        characteristic: BluetoothGattCharacteristic,
+        enabled: Boolean
+    ): Boolean {
+        return try {
+            val localSet = gatt.setCharacteristicNotification(characteristic, enabled)
+            if (!localSet) {
+                Log.w(TAG, "setCharacteristicNotification failed for ${characteristic.uuid}")
+                return false
+            }
+
+            val descriptor = characteristic.getDescriptor(CCCD_UUID)
+            if (descriptor == null) {
+                Log.w(TAG, "CCCD not found for ${characteristic.uuid}")
+                return false
+            }
+
+            descriptor.value = when {
+                !enabled -> BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+                characteristic.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0 ->
+                    BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                else -> BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            }
+
+            callback.prepareForDescriptorWrite()
+            gatt.writeDescriptor(descriptor)
+            callback.waitForDescriptorWriteResult()
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Permission denied when changing notifications for ${characteristic.uuid}", e)
+            false
+        }
+    }
+
+    private fun enqueueNotificationEvent(event: NotificationEvent) {
+        val clients = notifySubscriptions[subscriptionKey(event.macAddress, event.characteristicUuid)] ?: return
+        val clientIds = synchronized(clients) { clients.toList() }
+
+        clientIds.forEach { clientId ->
+            val queue = notificationQueues.getOrPut(
+                notificationQueueKey(event.macAddress, event.characteristicUuid, clientId)
+            ) { mutableListOf() }
+            synchronized(queue) {
+                while (queue.size >= MAX_NOTIFICATION_EVENTS) {
+                    queue.removeAt(0)
+                }
+                queue.add(event.copy(payload = event.payload.copyOf()))
+            }
+        }
+    }
+
+    private fun restoreNotifications(macAddress: String, gatt: BluetoothGatt, callback: BleGattCallback) {
+        val normalizedMacAddress = macAddress.uppercase(Locale.ROOT)
+        val subscriptionKeys = notifySubscriptions.keys.filter { it.startsWith("$normalizedMacAddress|") }
+        subscriptionKeys.forEach { key ->
+            val characteristicUuid = key.substringAfter('|')
+            val characteristic = getCharacteristic(gatt, characteristicUuid)
+            if (characteristic == null || !supportsNotify(characteristic)) {
+                Log.w(TAG, "Cannot restore notify for $macAddress/$characteristicUuid")
+                return@forEach
+            }
+
+            reconnectionScope.launch {
+                val restored = setCharacteristicNotification(gatt, callback, characteristic, true)
+                if (restored) {
+                    Log.d(TAG, "Restored notify for $macAddress/$characteristicUuid")
+                } else {
+                    Log.w(TAG, "Failed to restore notify for $macAddress/$characteristicUuid")
+                }
+            }
+        }
+    }
+
+    private fun clearNotificationState(macAddress: String) {
+        val normalizedMacAddress = macAddress.uppercase(Locale.ROOT)
+        notifySubscriptions.keys
+            .filter { it.startsWith("$normalizedMacAddress|") }
+            .forEach { subscriptionKey ->
+                notifySubscriptions.remove(subscriptionKey)?.let { clients ->
+                    val characteristicUuid = subscriptionKey.substringAfter('|')
+                    synchronized(clients) {
+                        clients.forEach { clientId ->
+                            notificationQueues.remove(notificationQueueKey(macAddress, characteristicUuid, clientId))
+                        }
+                    }
+                }
+            }
+    }
+
+    private fun subscriptionKey(macAddress: String, characteristicUuid: String): String {
+        return "${macAddress.uppercase(Locale.ROOT)}|${characteristicUuid.lowercase(Locale.ROOT)}"
+    }
+
+    private fun notificationQueueKey(macAddress: String, characteristicUuid: String, clientId: String): String {
+        return "${subscriptionKey(macAddress, characteristicUuid)}|$clientId"
     }
     
     fun getCharacteristics(macAddress: String): String? {
@@ -334,6 +588,8 @@ class BleConnectionManager(private val context: Context) {
             targetDevices.clear()
             messageQueue.clear()
         }
+        notifySubscriptions.clear()
+        notificationQueues.clear()
         
         // Disconnect all devices
         disconnectAll()
@@ -351,6 +607,8 @@ class BleConnectionManager(private val context: Context) {
         private var writeResult = false
         private var isWaitingForRead = false
         private var isWaitingForWrite = false
+        private var descriptorWriteResult = false
+        private var isWaitingForDescriptorWrite = false
         
         override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
             when (newState) {
@@ -379,6 +637,9 @@ class BleConnectionManager(private val context: Context) {
         override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 Log.d(TAG, "Services discovered for $macAddress")
+                if (gatt != null) {
+                    restoreNotifications(macAddress, gatt, this)
+                }
             }
         }
         
@@ -399,6 +660,23 @@ class BleConnectionManager(private val context: Context) {
                 isWaitingForWrite = false
             }
         }
+
+        override fun onCharacteristicChanged(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?) {
+            if (characteristic == null) return
+            val event = NotificationEvent(
+                macAddress = macAddress,
+                characteristicUuid = characteristic.uuid.toString(),
+                payload = characteristic.value?.copyOf() ?: byteArrayOf()
+            )
+            enqueueNotificationEvent(event)
+        }
+
+        override fun onDescriptorWrite(gatt: BluetoothGatt?, descriptor: BluetoothGattDescriptor?, status: Int) {
+            if (isWaitingForDescriptorWrite) {
+                descriptorWriteResult = status == BluetoothGatt.GATT_SUCCESS
+                isWaitingForDescriptorWrite = false
+            }
+        }
         
         fun prepareForRead() {
             readResult = null
@@ -408,6 +686,11 @@ class BleConnectionManager(private val context: Context) {
         fun prepareForWrite() {
             writeResult = false
             isWaitingForWrite = true
+        }
+
+        fun prepareForDescriptorWrite() {
+            descriptorWriteResult = false
+            isWaitingForDescriptorWrite = true
         }
         
         suspend fun waitForReadResult(): ByteArray? {
@@ -426,6 +709,15 @@ class BleConnectionManager(private val context: Context) {
                 attempts++
             }
             return writeResult
+        }
+
+        suspend fun waitForDescriptorWriteResult(): Boolean {
+            var attempts = 0
+            while (isWaitingForDescriptorWrite && attempts < 50) {
+                delay(100)
+                attempts++
+            }
+            return descriptorWriteResult
         }
     }
 }
