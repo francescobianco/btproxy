@@ -66,21 +66,32 @@
         android:textStyle="bold"
         android:layout_marginBottom="4dp" />
 
-    <ScrollView
+    <HorizontalScrollView
         android:layout_width="match_parent"
         android:layout_height="120dp"
-        android:background="@android:color/black">
+        android:background="@android:color/black"
+        android:fillViewport="true"
+        android:scrollbars="horizontal">
 
-        <TextView
-            android:id="@+id/logTextView"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text=""
-            android:textColor="@android:color/white"
-            android:textSize="10sp"
-            android:fontFamily="monospace"
-            android:padding="8dp" />
+        <ScrollView
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:fillViewport="true"
+            android:scrollbars="vertical">
 
-    </ScrollView>
+            <TextView
+                android:id="@+id/logTextView"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textColor="@android:color/white"
+                android:textSize="10sp"
+                android:fontFamily="monospace"
+                android:padding="8dp"
+                android:scrollHorizontally="true" />
+
+        </ScrollView>
+
+    </HorizontalScrollView>
 
 </LinearLayout>

@@ -134,19 +134,14 @@ Authenticated endpoints (require X-BtProxy header):
                     get("/{macAddress}/{characteristicUuid}") {
                         val macAddress = call.parameters["macAddress"]!!
                         val characteristicUuid = call.parameters["characteristicUuid"]!!
-                        
-                        if (!bleConnectionManager.isDeviceConnected(macAddress)) {
-                            call.respondText("ERROR: Device not connected", ContentType.Text.Plain, HttpStatusCode.NotFound)
+
+                        if (!isAuthenticated(call.request)) {
+                            call.respondText("ERROR: Invalid authentication token", ContentType.Text.Plain, HttpStatusCode.Unauthorized)
                             return@get
                         }
-                        
-                        // Check authentication header
-                        val authHeader = call.request.headers["X-BtProxy"]
-                        val expectedToken = getSharedPreferences("btproxy_prefs", MODE_PRIVATE)
-                            .getString("auth_token", "secret") ?: "secret"
-                        
-                        if (authHeader != expectedToken) {
-                            call.respondText("ERROR: Invalid authentication token", ContentType.Text.Plain, HttpStatusCode.Unauthorized)
+
+                        if (!bleConnectionManager.isDeviceConnected(macAddress)) {
+                            call.respondText("ERROR: Device not connected", ContentType.Text.Plain, HttpStatusCode.NotFound)
                             return@get
                         }
                         
@@ -164,13 +159,8 @@ Authenticated endpoints (require X-BtProxy header):
                     post("/{macAddress}/{characteristicUuid}") {
                         val macAddress = call.parameters["macAddress"]!!
                         val characteristicUuid = call.parameters["characteristicUuid"]!!
-                        
-                        // Check authentication header
-                        val authHeader = call.request.headers["X-BtProxy"]
-                        val expectedToken = getSharedPreferences("btproxy_prefs", MODE_PRIVATE)
-                            .getString("auth_token", "secret") ?: "secret"
-                        
-                        if (authHeader != expectedToken) {
+
+                        if (!isAuthenticated(call.request)) {
                             call.respondText("ERROR: Invalid authentication token", ContentType.Text.Plain, HttpStatusCode.Unauthorized)
                             return@post
                         }
@@ -210,11 +200,7 @@ Authenticated endpoints (require X-BtProxy header):
                     get("/devices/{macAddress}/characteristics") {
                         val macAddress = call.parameters["macAddress"]!!
 
-                        val authHeader = call.request.headers["X-BtProxy"]
-                        val expectedToken = getSharedPreferences("btproxy_prefs", MODE_PRIVATE)
-                            .getString("auth_token", "secret") ?: "secret"
-
-                        if (authHeader != expectedToken) {
+                        if (!isAuthenticated(call.request)) {
                             call.respondText("ERROR: Invalid authentication token", ContentType.Text.Plain, HttpStatusCode.Unauthorized)
                             return@get
                         }
@@ -259,6 +245,15 @@ Authenticated endpoints (require X-BtProxy header):
         }
     }
     
+    private fun isAuthenticated(request: io.ktor.server.request.ApplicationRequest): Boolean {
+        val provided = request.headers.entries()
+            .firstOrNull { it.key.equals("X-BtProxy", ignoreCase = true) }
+            ?.value?.firstOrNull()
+        val expected = getSharedPreferences("btproxy_prefs", MODE_PRIVATE)
+            .getString("auth_token", "secret") ?: "secret"
+        return provided == expected
+    }
+
     private fun parseSpaceHexString(hexString: String): ByteArray? {
         return try {
             if (hexString.isBlank()) return byteArrayOf()
