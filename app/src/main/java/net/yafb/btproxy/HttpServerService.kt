@@ -207,6 +207,31 @@ Authenticated endpoints (require X-BtProxy header):
                         }
                     }
                     
+                    get("/devices/{macAddress}/characteristics") {
+                        val macAddress = call.parameters["macAddress"]!!
+
+                        val authHeader = call.request.headers["X-BtProxy"]
+                        val expectedToken = getSharedPreferences("btproxy_prefs", MODE_PRIVATE)
+                            .getString("auth_token", "secret") ?: "secret"
+
+                        if (authHeader != expectedToken) {
+                            call.respondText("ERROR: Invalid authentication token", ContentType.Text.Plain, HttpStatusCode.Unauthorized)
+                            return@get
+                        }
+
+                        if (!bleConnectionManager.isDeviceConnected(macAddress)) {
+                            call.respondText("ERROR: Device not connected", ContentType.Text.Plain, HttpStatusCode.NotFound)
+                            return@get
+                        }
+
+                        val result = bleConnectionManager.getCharacteristics(macAddress)
+                        if (result != null) {
+                            call.respondText(result, ContentType.Text.Plain)
+                        } else {
+                            call.respondText("ERROR: Failed to retrieve characteristics", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
+                        }
+                    }
+
                     get("/devices") {
                         try {
                             val connectedDevices = bleConnectionManager.getConnectedDevices()

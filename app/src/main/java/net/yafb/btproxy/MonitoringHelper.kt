@@ -1,6 +1,8 @@
 package net.yafb.btproxy
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -24,12 +26,24 @@ object MonitoringHelper {
             mapOf("event" to event, "timestamp" to System.currentTimeMillis()) + extras
         )
 
+        val versionName = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.packageManager.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0)).versionName
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName
+            }
+        } catch (e: Exception) {
+            "unknown"
+        }
+
         withContext(Dispatchers.IO) {
             try {
                 val connection = URL(url).openConnection() as HttpURLConnection
                 connection.apply {
                     requestMethod = "POST"
                     setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("X-BTProxy-Version", versionName)
                     connectTimeout = TIMEOUT_MS
                     readTimeout = TIMEOUT_MS
                     doOutput = true

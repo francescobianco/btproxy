@@ -11,6 +11,7 @@ import android.content.*
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -30,8 +31,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var startServerButton: Button
     private lateinit var statusTextView: TextView
     private lateinit var logTextView: TextView
-    
+    private lateinit var devicesLabelTextView: TextView
+
     private val discoveredDevices = mutableListOf<BluetoothDevice>()
+    private val displayedDevices = mutableListOf<BluetoothDevice>()
     private val selectedDevices = mutableSetOf<String>()
     private val savedDiscoveredAddresses = mutableSetOf<String>()
     private var isScanning = false
@@ -79,6 +82,7 @@ class MainActivity : AppCompatActivity() {
             val device = result.device
             if (!discoveredDevices.any { it.address == device.address }) {
                 discoveredDevices.add(device)
+                displayedDevices.add(device)
                 runOnUiThread {
                     deviceAdapter.notifyDataSetChanged()
                 }
@@ -134,9 +138,10 @@ class MainActivity : AppCompatActivity() {
         startServerButton = findViewById(R.id.startServerButton)
         statusTextView = findViewById(R.id.statusTextView)
         logTextView = findViewById(R.id.logTextView)
+        devicesLabelTextView = findViewById(R.id.devicesLabelTextView)
 
         val recyclerView = findViewById<RecyclerView>(R.id.devicesRecyclerView)
-        deviceAdapter = DeviceAdapter(discoveredDevices, selectedDevices) { device, isSelected ->
+        deviceAdapter = DeviceAdapter(displayedDevices, selectedDevices) { device, isSelected ->
             if (isSelected) {
                 selectedDevices.add(device.address)
             } else {
@@ -188,15 +193,17 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Permissions not granted", Toast.LENGTH_SHORT).show()
             return
         }
-        
+
         if (bluetoothAdapter?.isEnabled != true) {
             Toast.makeText(this, "Bluetooth not enabled", Toast.LENGTH_SHORT).show()
             return
         }
-        
+
         discoveredDevices.clear()
+        displayedDevices.clear()
         deviceAdapter.notifyDataSetChanged()
-        
+        devicesLabelTextView.text = "Available Devices:"
+
         try {
             bleScanner.startScan(scanCallback)
             isScanning = true
@@ -205,11 +212,15 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Permission denied for scanning", Toast.LENGTH_SHORT).show()
         }
     }
-    
+
     private fun stopScan() {
         try {
             bleScanner.stopScan(scanCallback)
             isScanning = false
+            displayedDevices.clear()
+            displayedDevices.addAll(discoveredDevices.filter { it.address in selectedDevices })
+            deviceAdapter.notifyDataSetChanged()
+            devicesLabelTextView.text = "Selected Devices:"
             updateUI()
         } catch (e: SecurityException) {
             // Ignore
@@ -337,7 +348,7 @@ class MainActivity : AppCompatActivity() {
         // If server was running, restart it
         if (isServerRunning && selectedDevices.isNotEmpty()) {
             // Delay to ensure UI is ready
-            postDelayed({
+            android.os.Handler(mainLooper).postDelayed({
                 addLogEntry("Auto-restarting server from saved state with ${selectedDevices.size} devices", System.currentTimeMillis())
                 startHttpServer()
             }, 1000)
@@ -375,6 +386,9 @@ class MainActivity : AppCompatActivity() {
             
             if (discoveredDevices.isNotEmpty()) {
                 runOnUiThread {
+                    displayedDevices.clear()
+                    displayedDevices.addAll(discoveredDevices.filter { it.address in selectedDevices })
+                    devicesLabelTextView.text = "Selected Devices:"
                     deviceAdapter.notifyDataSetChanged()
                     addLogEntry("Restored ${discoveredDevices.size} known devices", System.currentTimeMillis())
                 }

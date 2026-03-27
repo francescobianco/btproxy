@@ -284,6 +284,32 @@ class BleConnectionManager(private val context: Context) {
         }
     }
     
+    fun getCharacteristics(macAddress: String): String? {
+        val gatt = connections[macAddress] ?: return null
+        return try {
+            val sb = StringBuilder()
+            gatt.services?.forEach { service ->
+                sb.appendLine("service: ${service.uuid}")
+                service.characteristics?.forEach { characteristic ->
+                    val props = buildList {
+                        if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0) add("READ")
+                        if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) add("WRITE")
+                        if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) add("WRITE_NO_RESPONSE")
+                        if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) add("NOTIFY")
+                        if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) add("INDICATE")
+                        if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_BROADCAST != 0) add("BROADCAST")
+                        if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_SIGNED_WRITE != 0) add("SIGNED_WRITE")
+                    }.joinToString(" ")
+                    sb.appendLine("  characteristic: ${characteristic.uuid} properties: $props")
+                }
+            }
+            sb.toString()
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Permission denied when listing characteristics for $macAddress", e)
+            null
+        }
+    }
+
     fun getConnectedDevices(): List<String> {
         return connections.keys.toList()
     }
