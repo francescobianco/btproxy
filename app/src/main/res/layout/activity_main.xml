@@ -67,6 +67,7 @@
         android:layout_marginBottom="4dp" />
 
     <HorizontalScrollView
+        android:id="@+id/logHorizontalScrollView"
         android:layout_width="match_parent"
         android:layout_height="120dp"
         android:background="@android:color/black"
@@ -74,6 +75,7 @@
         android:scrollbars="horizontal">
 
         <ScrollView
+            android:id="@+id/logScrollView"
             android:layout_width="wrap_content"
             android:layout_height="match_parent"
             android:fillViewport="true"

@@ -31,6 +31,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var startServerButton: Button
     private lateinit var statusTextView: TextView
     private lateinit var logTextView: TextView
+    private lateinit var logScrollView: ScrollView
     private lateinit var devicesLabelTextView: TextView
 
     private val discoveredDevices = mutableListOf<BluetoothDevice>()
@@ -138,6 +139,7 @@ class MainActivity : AppCompatActivity() {
         startServerButton = findViewById(R.id.startServerButton)
         statusTextView = findViewById(R.id.statusTextView)
         logTextView = findViewById(R.id.logTextView)
+        logScrollView = findViewById(R.id.logScrollView)
         devicesLabelTextView = findViewById(R.id.devicesLabelTextView)
 
         val recyclerView = findViewById<RecyclerView>(R.id.devicesRecyclerView)
@@ -302,6 +304,9 @@ class MainActivity : AppCompatActivity() {
         
         runOnUiThread {
             logTextView.text = logEntries.joinToString("\n")
+            logScrollView.post {
+                logScrollView.fullScroll(ScrollView.FOCUS_DOWN)
+            }
         }
     }
     
